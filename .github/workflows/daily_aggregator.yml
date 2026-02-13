@@ -87,12 +87,12 @@ jobs:
         # 1. 先把修改添加到暂存区
         git add sub.txt nodes.txt
         
-        # 2. 提交到本地仓库
-        # 如果文件没有变化，commit 会返回非 0 状态码，所以使用 || exit 0 忽略
+        # 2. 必须先 commit，让工作区变干净。
+        # 使用 || exit 0 是为了防止在没有节点变化时脚本报错停止。
         git commit -m "Auto-update proxy nodes [$(date)]" || exit 0
         
-        # 3. 此时工作区是干净的，可以安全地拉取远程修改并重排提交
-        # 这会把 fetch_raw job 的提交放在最下面，把当前的测试结果放在最上面
+        # 3. 此时本地已经有一个 commit 了，再执行 pull --rebase。
+        # 它会把远程 fetch_raw 的提交拉下来，并将你刚刚的这个 commit 重新“接”在远程提交之后。
         git pull --rebase
         
         # 4. 最后推送
