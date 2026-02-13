@@ -84,11 +84,16 @@ jobs:
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         
+        # 1. 先把修改添加到暂存区
         git add sub.txt nodes.txt
         
-        # [关键步骤] 因为 fetch_raw 刚刚推送了代码，远程仓库已经更新。
-        # 这里必须先拉取合并，否则 push 会失败。
+        # 2. 提交到本地仓库
+        # 如果文件没有变化，commit 会返回非 0 状态码，所以使用 || exit 0 忽略
+        git commit -m "Auto-update proxy nodes [$(date)]" || exit 0
+        
+        # 3. 此时工作区是干净的，可以安全地拉取远程修改并重排提交
+        # 这会把 fetch_raw job 的提交放在最下面，把当前的测试结果放在最上面
         git pull --rebase
         
-        git commit -m "Auto-update proxy nodes [$(date)]" || exit 0
+        # 4. 最后推送
         git push
