@@ -7,6 +7,7 @@ import random
 import logging
 import threading
 import queue
+import hashlib # [新增] 用于特征哈希计算
 from urllib.parse import quote
 from typing import List, Set, Dict, Any, Optional, Union
 
@@ -24,9 +25,9 @@ except ImportError:
 
 # 关键词列表：已优化，保留高价值关键词，移除冗余项以节省请求次数
 KEYWORDS: List[str] = [
-    "proxies", "clash", "subscription", "vmess", "vless", 
-    "trojan", "shadowsocks", "hysteria2", "sub", "config", 
-    "v2ray", "ss", "节点", "机场", "翻墙"
+    "proxies", "clash", "subscription", "vmess://", "vless://", 
+    "trojan://", "shadowsocks", "hysteria2", "sub", "config",  "hy://",
+    "v2ray", "ss://", "节点", "机场", "翻墙"
 ]
 
 # 文件后缀：包含 yml 以覆盖更多 Clash 配置
@@ -55,6 +56,7 @@ class NodeAggregator:
     def __init__(self, token: Optional[str]):
         self.github_token = token
         self.nodes: Set[str] = set()
+        self.seen_hashes: Set[str] = set() # [新增] 用于特征值去重的哈希集合
         self.nodes_lock = threading.Lock() # 线程锁，保护集合写入安全
         
         # 初始化 Session (包含连接池优化)
@@ -125,6 +127,32 @@ class NodeAggregator:
             return base64.b64decode(text).decode('utf-8', errors='ignore')
         except Exception:
             return None
+
+    # --- [新增] 核心特征值生成（优化项 1：去重逻辑） ---
+    def _get_node_hash(self, link: str) -> str:
+        """剥离名称备注等冗余信息，仅对节点的核心连接参数进行哈希"""
+        link = link.strip()
+        if "://" not in link:
+            return hashlib.md5(link.encode('utf-8')).hexdigest()
+        
+        try:
+            protocol, rest = link.split("://", 1)
+            protocol = protocol.lower()
+            
+            # vmess 需要解密 base64 后剔除 'ps' (备注) 字段
+            if protocol == "vmess":
+                decoded = self.safe_base64_decode(rest)
+                if decoded:
+                    conf = json.loads(decoded)
+                    conf.pop("ps", None) 
+                    conf_str = json.dumps(conf, sort_keys=True)
+                    return hashlib.md5(f"vmess://{conf_str}".encode('utf-8')).hexdigest()
+            
+            # 其他协议直接去除 # 后面的备注信息
+            core = rest.split("#")[0]
+            return hashlib.md5(f"{protocol}://{core}".encode('utf-8')).hexdigest()
+        except Exception:
+            return hashlib.md5(link.encode('utf-8')).hexdigest()
 
     # --- [完整保留] 节点构建逻辑 ---
 
@@ -282,7 +310,11 @@ class NodeAggregator:
                         with self.nodes_lock:
                             count_before = len(self.nodes)
                             for node in nodes:
-                                self.nodes.add(node)
+                                # [核心改动：应用哈希去重逻辑]
+                                node_hash = self._get_node_hash(node)
+                                if node_hash not in self.seen_hashes:
+                                    self.seen_hashes.add(node_hash)
+                                    self.nodes.add(node)
                             # 简单的进度展示
                             if len(self.nodes) > count_before and len(self.nodes) % 50 == 0:
                                 logger.info(f"当前库存: {len(self.nodes)} 个唯一节点")
@@ -296,6 +328,8 @@ class NodeAggregator:
         logger.info(f"开始搜索 GitHub, 关键词队列: {len(KEYWORDS)} 个")
         random.shuffle(KEYWORDS) # 打乱顺序
         
+        consecutive_limit_hits = 0 # 新增：连续风控计数器
+
         for keyword in KEYWORDS:
             if self.should_stop: break
             
@@ -325,12 +359,20 @@ class NodeAggregator:
                             
                             # 触发速率限制：原地等待并重试，绝不跳过
                             if resp.status_code in [403, 429]:
+                                consecutive_limit_hits += 1 # 计数 +1
+                                
+                                # 新增：连续4次风控则熔断
+                                if consecutive_limit_hits >= 4:
+                                    logger.warning("连续 4 次触发 API 速率限制，判定为高风险，停止搜索任务并进入后续处理...")
+                                    return 
+
                                 wait_time = 60 * (attempt + 1) # 第一次60s，第二次120s
                                 logger.warning(f"触发 API 速率限制，暂停 {wait_time} 秒后重试 (第 {attempt+1} 次)...")
                                 time.sleep(wait_time)
                                 continue 
                             
                             if resp.status_code == 200:
+                                consecutive_limit_hits = 0 # 成功则重置计数
                                 items = resp.json().get("items", [])
                                 logger.info(f"搜索 [{query} P{page}] -> 找到 {len(items)} 个文件")
                                 
